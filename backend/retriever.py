@@ -531,6 +531,38 @@ def _get_embedder():
     return _embedder
 
 
+# The ONNX build of the SAME reranker weights. Note the repo id has no hyphen
+# in "L6": the hyphenated name redirects for PyTorch files, and this is where
+# the exported ONNX files live.
+RERANK_ONNX_REPO = "cross-encoder/ms-marco-MiniLM-L6-v2"
+
+
+def _load_onnx_reranker(max_len: int):
+    """int8-quantized ONNX build of the same cross-encoder.
+
+    Why: on Cloud Run's 2 vCPUs the PyTorch model measured ~166 ms per
+    (query, passage) pair (9.78s for 59 pairs, 2026-11-15), which is most of
+    the time before the first word of an answer. ONNX Runtime with dynamic
+    int8 quantization runs the same network several times faster on CPU.
+
+    Same weights, quantized, so scores shift slightly. Check ranking agreement
+    with scripts/bench_reranker.py before turning it on.
+    """
+    import onnxruntime as ort
+    opts = ort.SessionOptions()
+    # Same reason as TORCH_NUM_THREADS: the container sees the HOST core count,
+    # so the default thread pool oversubscribes the 2 allocated vCPUs.
+    opts.intra_op_num_threads = int(os.getenv("TORCH_NUM_THREADS", "4"))
+    opts.inter_op_num_threads = 1
+    file_name = os.getenv("RERANK_ONNX_FILE", "onnx/model_quint8_avx2.onnx")
+    log.info("Loading ONNX cross-encoder %s (%s, max_length=%d)...",
+             RERANK_ONNX_REPO, file_name, max_len)
+    return CrossEncoder(
+        RERANK_ONNX_REPO, max_length=max_len, backend="onnx", device="cpu",
+        model_kwargs={"file_name": file_name, "session_options": opts,
+                      "provider": "CPUExecutionProvider"})
+
+
 def _get_reranker() -> CrossEncoder:
     global _reranker
     if _reranker is None:
@@ -540,6 +572,15 @@ def _get_reranker() -> CrossEncoder:
         # chunk — dropping to 256 measurably hurt ranking quality (correct
         # chunks fell out of the top results). Tune via RERANK_MAX_LEN.
         max_len = int(os.getenv("RERANK_MAX_LEN", "512"))
+        if os.getenv("RERANK_BACKEND", "torch").lower() == "onnx":
+            try:
+                _reranker = _load_onnx_reranker(max_len)
+                return _reranker
+            except Exception as e:  # noqa: BLE001
+                # A missing file or package must not take the service down: the
+                # PyTorch model is always baked into the image.
+                log.error("ONNX reranker failed to load (%s: %s); falling back "
+                          "to PyTorch", type(e).__name__, e)
         log.info("Loading cross-encoder re-ranker (max_length=%d)...", max_len)
         _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2",
                                  max_length=max_len)

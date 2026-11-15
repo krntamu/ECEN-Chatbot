@@ -479,7 +479,12 @@ def _is_creator_question(question: str) -> bool:
 
 _CHITCHAT_RE = _re.compile(
     r"^\s*(hi|hello|hey|howdy|greetings?|sup|yo|"
-    r"thanks?|thank\s*you|ty|cheers|"
+    # A thank-you with a short tail ("thanks for your help!", "thank you so
+    # much") is still just a thank-you. Without the tail it fell through to
+    # full retrieval: seconds of reranking to say "you're welcome". Anchored at
+    # both ends, so "thanks, also who teaches ECEN 314?" is NOT matched.
+    r"(thanks?|thank\s*you|ty|cheers)"
+    r"(\s+(a\s+lot|so\s+much|very\s+much|again|for\s+(your|the|all\s+the)\s+help))?|"
     r"bye|goodbye|see\s*you|"
     r"what\s+can\s+you\s+do|what\s+are\s+you|who\s+are\s+you|"
     # "are you a real person / human / a bot?" — identity questions must be
@@ -886,16 +891,28 @@ def _resolve_followup_question(question: str, history: list[dict]) -> str:
 
 
 async def _route(req: "ChatRequest") -> tuple["ChatRequest", Optional[dict], Optional[list]]:
-    """Classify intent with zero-latency heuristics and prefetch retrieval.
+    """Classify intent with zero-latency heuristics. Does NOT retrieve.
 
-    Returns (search_req, route, prefetched_chunks).
+    Returns (search_req, route, prefetched_chunks); prefetched is always None
+    now and is kept only so callers don't change.
 
-    The LLM router has been replaced by _fast_route() — a pure in-process
-    function with no network calls. Retrieval runs immediately after, so the
-    only latency on the critical path is the DB round-trip (~0.3–0.5 s).
+    This used to run full retrieval here ("prefetch") for every non-chitchat
+    question. But the roster paths in _prepare_chunks_inner (faculty by area,
+    all faculty, research-area list, degree list) build their context from the
+    knowledge graph and never look at retrieved chunks, so for those questions
+    the whole dense + keyword + cross-encoder pass was computed and thrown
+    away. Production timings on 2026-11-15:
+
+        'What research areas does TAMU ECE specialize in?'  retrieval 11.14s, unused
+        'Who are the AI & machine learning researchers?'    retrieval 11.28s, unused
+
+    Four of the six example cards on the landing page take a roster path, so
+    the most-clicked questions were the ones paying for it. Retrieval now
+    happens lazily, at the one place that uses it (the open-ended path at the
+    end of _prepare_chunks_inner). Answers are unchanged: the context each path
+    builds is exactly what it was.
     """
     route = _fast_route(req)
-    # For chitchat/creator we don't need retrieval at all — skip it.
     if route["intent"] in ("chitchat", "creator"):
         return req, route, None
 
@@ -906,9 +923,7 @@ async def _route(req: "ChatRequest") -> tuple["ChatRequest", Optional[dict], Opt
     search_req = req if resolved == req.question else req.model_copy(
         update={"question": resolved})
     route["standalone_question"] = resolved
-
-    prefetched = await retrieve_async(search_req.question, req.section_filter)
-    return search_req, route, prefetched
+    return search_req, route, None
 
 
 @app.post("/chat", summary="Streaming chat (Server-Sent Events)")
@@ -934,7 +949,7 @@ async def chat_stream(request: Request, req: ChatRequest):
         _audit(request, req.question, req.question, None, [], _UNAVAILABLE_TEXT,
                flagged="routing_error")
         return _canned_stream(_UNAVAILABLE_TEXT)
-    log.info("TIMING route+retrieval: %.2fs (intent=%s) for %r",
+    log.info("TIMING route: %.2fs (intent=%s) for %r",
              _t.perf_counter() - _t_req, (route or {}).get("intent"), req.question)
 
     # LLM-detected injection / jailbreak / exfiltration attempt.
