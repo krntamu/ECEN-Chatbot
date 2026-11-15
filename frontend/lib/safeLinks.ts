@@ -12,7 +12,14 @@
  * LinkedIn profile.
  */
 const ALLOWED_HOST_SUFFIXES = ["tamu.edu"];
-const ALLOWED_EXACT_PREFIXES = ["https://www.linkedin.com/in/aarohi-mohrir"];
+// The one off-domain link the prompt allows. Matched on parsed host AND exact
+// path: a prefix match would also pass /in/aarohi-mohrir-fake or
+// /in/aarohi-mohrir/../../redir?url=... on the same host.
+const CREATOR_HOST = "www.linkedin.com";
+const CREATOR_PATH_RE = /^\/in\/aarohi-mohrir\/?$/;
+// One plain address, nothing else: no second recipient, no encoded characters,
+// no ?cc= / ?body= that would prefill a message the user didn't write.
+const MAILTO_RE = /^[a-z0-9._+-]+@([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/i;
 
 function hostAllowed(host: string): boolean {
   const h = host.toLowerCase().replace(/\.$/, "");
@@ -20,9 +27,11 @@ function hostAllowed(host: string): boolean {
 }
 
 export function isAllowedLink(href: string | undefined | null): boolean {
-  if (!href) return false;
+  if (!href || href.length > 2000) return false;
   const raw = href.trim();
-  if (ALLOWED_EXACT_PREFIXES.some(p => raw.startsWith(p))) return true;
+  // Control characters and whitespace inside a URL are only ever there to
+  // confuse a parser ("java\tscript:", embedded newlines).
+  if (/[\u0000-\u0020\u007f]/.test(raw)) return false;
   let url: URL;
   try {
     url = new URL(raw);
@@ -30,11 +39,14 @@ export function isAllowedLink(href: string | undefined | null): boolean {
     return false; // relative or malformed: nothing sensible to open
   }
   if (url.protocol === "mailto:") {
-    const addr = decodeURIComponent(url.pathname);
-    const at = addr.lastIndexOf("@");
-    return at > 0 && !addr.includes(",") && hostAllowed(addr.slice(at + 1));
+    if (url.search || url.hash) return false;
+    const m = MAILTO_RE.exec(url.pathname);
+    return !!m && hostAllowed(m[1]);
   }
   if (url.protocol !== "https:") return false;
   if (url.username || url.password) return false; // https://tamu.edu@evil.com
+  if (url.hostname === CREATOR_HOST) {
+    return CREATOR_PATH_RE.test(url.pathname) && !url.search && !url.hash && !url.port;
+  }
   return hostAllowed(url.hostname);
 }

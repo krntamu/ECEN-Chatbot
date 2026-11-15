@@ -37,6 +37,9 @@ function fixedHops(): number {
 export function isInfrastructure(ip: string): boolean {
   const v = ip.toLowerCase();
   if (v.includes(":")) {
+    // Anything that isn't plainly an IPv6 literal ("host:port", "[::1]:443",
+    // free text) is not a client address.
+    if (!/^[0-9a-f:.]{2,45}$/.test(v) || !v.includes("::") && v.split(":").length !== 8) return true;
     // IPv6 loopback, link-local, unique-local; and IPv4-mapped forms.
     if (v === "::1" || v.startsWith("fe80:") || v.startsWith("fc") || v.startsWith("fd")) return true;
     const mapped = v.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);

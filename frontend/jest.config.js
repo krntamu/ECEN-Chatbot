@@ -15,6 +15,33 @@ const config = {
   moduleNameMapper: {
     "^@/(.*)$": "<rootDir>/$1",
   },
+  // A local `next build` leaves a second package.json under .next/standalone;
+  // without this Jest scans it (duplicate-module warnings, and a hard read
+  // error on some filesystems).
+  modulePathIgnorePatterns: ["<rootDir>/.next/"],
 };
 
-module.exports = createJestConfig(config);
+// react-markdown and everything under it (unified, remark, micromark, ...)
+// ship as ES modules only, which Jest can't load untransformed. next/jest sets
+// transformIgnorePatterns itself and ignores a value passed in above, so it is
+// patched after the config is built. Needed by tests that render real markdown
+// (__tests__/adversarial.test.tsx).
+const ESM_PACKAGES = [
+  "react-markdown", "unified", "bail", "is-plain-obj", "trough", "devlop",
+  "vfile", "vfile-message", "unist-.*", "mdast-.*", "hast-.*", "micromark.*",
+  "remark-.*", "decode-named-character-reference", "character-entities.*",
+  "character-reference-invalid", "is-(alphabetical|alphanumerical|decimal|hexadecimal)",
+  "parse-entities", "stringify-entities", "property-information",
+  "space-separated-tokens", "comma-separated-tokens", "html-url-attributes",
+  "estree-util-.*", "style-to-(object|js)", "inline-style-parser",
+  "trim-lines", "zwitch", "ccount", "longest-streak", "markdown-table",
+];
+
+module.exports = async () => {
+  const built = await createJestConfig(config)();
+  built.transformIgnorePatterns = [
+    `/node_modules/(?!(${ESM_PACKAGES.join("|")})/)`,
+    "^.+\\.module\\.(css|sass|scss)$",
+  ];
+  return built;
+};

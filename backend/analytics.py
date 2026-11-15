@@ -170,6 +170,15 @@ def _submit(sql: str, params: tuple) -> None:
             _backlog -= 1
 
 
+def _clean(value, limit: int):
+    """Make a user-supplied string safe to store whatever the caller did:
+    Postgres text cannot hold NUL (psycopg2 raises on it, which would silently
+    lose the row), and nothing unbounded goes into the table."""
+    if value is None:
+        return None
+    return str(value).replace("\x00", "")[:limit]
+
+
 def record_chat(*, request_id: str, ip_hash: str, question: str, resolved: str | None,
                 intent: str | None, flagged: str | None, sources: list,
                 answer_chars: int, answer_preview: str,
@@ -180,8 +189,11 @@ def record_chat(*, request_id: str, ip_hash: str, question: str, resolved: str |
         "INSERT INTO chat_log (request_id, ip_hash, question, resolved, intent, "
         "flagged, sources, answer_chars, answer_preview, latency_ms) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-        (request_id or None, ip_hash, question, resolved, intent, flagged,
-         json.dumps(sources), answer_chars, answer_preview, latency_ms))
+        (_clean(request_id, 64) or None, _clean(ip_hash, 64),
+         _clean(question, 1000), _clean(resolved, 1000), _clean(intent, 64),
+         _clean(flagged, 64),
+         json.dumps([_clean(u, 500) for u in (sources or [])][:10]),
+         answer_chars, _clean(answer_preview, 2000), latency_ms))
 
 
 def record_feedback(*, request_id: str, ip_hash: str, rating: str,
@@ -189,7 +201,8 @@ def record_feedback(*, request_id: str, ip_hash: str, rating: str,
     _submit(
         "INSERT INTO chat_feedback (request_id, ip_hash, rating, question, "
         "answer_preview) VALUES (%s, %s, %s, %s, %s)",
-        (request_id or None, ip_hash, rating, question, answer_preview))
+        (_clean(request_id, 64) or None, _clean(ip_hash, 64), rating,
+         _clean(question, 1000), _clean(answer_preview, 2000)))
 
 
 def summary(days: int = 7) -> dict:

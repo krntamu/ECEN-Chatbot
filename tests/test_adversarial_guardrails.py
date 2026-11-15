@@ -186,8 +186,20 @@ def test_correction_is_deterministic():
 
 # ── R.1: "Hi" must survive request validation ────────────────────────────────
 
-def test_two_letter_greeting_is_accepted_by_the_request_model():
+def _import_main():
+    """main.py imports the scheduler, which needs apscheduler. It isn't a test
+    dependency, and this file only passed when another test module happened to
+    install the stub first: run on its own, these three tests errored."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_outage_end_to_end import _install_scheduler_stub
+    _install_scheduler_stub()
+    os.environ.setdefault("DISABLE_SCHEDULER", "1")
     import main  # noqa: E402  (imported late: pulls the FastAPI app)
+    return main
+
+
+def test_two_letter_greeting_is_accepted_by_the_request_model():
+    main = _import_main()
     field = main.ChatRequest.model_fields["question"]
     constraints = {type(m).__name__: getattr(m, "min_length", None)
                    for m in field.metadata}
@@ -198,13 +210,13 @@ def test_two_letter_greeting_is_accepted_by_the_request_model():
 
 
 def test_chitchat_regex_still_claims_the_greeting():
-    import main  # noqa: E402
+    main = _import_main()
     assert main._CHITCHAT_RE.match("Hi")
     assert main._fast_route(main.ChatRequest(question="Hi"))["intent"] == "chitchat"
 
 
 def test_empty_question_is_still_rejected():
-    import main  # noqa: E402
+    main = _import_main()
     import pydantic
     with pytest.raises(pydantic.ValidationError):
         main.ChatRequest(question="")
