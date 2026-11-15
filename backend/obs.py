@@ -92,6 +92,13 @@ def setup_logging() -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level)
+    # uvicorn installs its own handlers (and turns propagation off) before it
+    # imports the app, so its access and error lines would otherwise stay
+    # plain text with no severity or request ID.
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        lg = logging.getLogger(name)
+        lg.handlers[:] = [handler]
+        lg.propagate = False
 
 
 def _pick_request_id(headers: list) -> str:

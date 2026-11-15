@@ -60,10 +60,10 @@ jobs:
       - run: pip install pip-audit
       - name: pip-audit (pinned versions, if any)
         run: |
-          if grep -qvE '^\s*(#|$)' constraints.txt; then
-            pip-audit -r constraints.txt --no-deps --disable-pip
+          if grep -qvE '^\s*(#|$)' pinned-requirements.txt; then
+            pip-audit -r pinned-requirements.txt --no-deps --disable-pip
           else
-            echo "constraints.txt has no pins yet (run scripts/lock_deps.sh); auditing requirements instead"
+            echo "pinned-requirements.txt has no pins yet (run scripts/lock_deps.sh); auditing requirements instead"
             pip-audit -r backend/requirements.txt -r crawler/requirements.txt || true
           fi
       - name: npm audit (production deps)

@@ -138,13 +138,36 @@ def _write(sql: str, params: tuple) -> None:
         _warn("Analytics write skipped (%s: %s)", type(e).__name__, str(e)[:200])
 
 
+# Writes waiting for the single worker. If the database is slow, rows are
+# dropped past this point instead of piling up in memory without limit.
+MAX_BACKLOG = int(os.getenv("ANALYTICS_MAX_BACKLOG", "500"))
+_backlog = 0
+_backlog_lock = threading.Lock()
+
+
+def _run(sql: str, params: tuple) -> None:
+    global _backlog
+    try:
+        _write(sql, params)
+    finally:
+        with _backlog_lock:
+            _backlog -= 1
+
+
 def _submit(sql: str, params: tuple) -> None:
+    global _backlog
     if not ENABLED:
         return
+    with _backlog_lock:
+        if _backlog >= MAX_BACKLOG:
+            _warn("Analytics backlog full (%d); dropping rows", _backlog)
+            return
+        _backlog += 1
     try:
-        _executor.submit(_write, sql, params)
+        _executor.submit(_run, sql, params)
     except Exception:  # noqa: BLE001  (executor shut down at interpreter exit)
-        pass
+        with _backlog_lock:
+            _backlog -= 1
 
 
 def record_chat(*, request_id: str, ip_hash: str, question: str, resolved: str | None,

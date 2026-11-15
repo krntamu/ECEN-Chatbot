@@ -444,18 +444,23 @@ gcloud logging read 'resource.labels.service_name="ecen-chatbot" AND jsonPayload
 Set `LOG_FORMAT=text` to force the readable format, `LOG_FORMAT=json` to force
 JSON locally.
 
+Heads-up when this first deploys: the service's lines move from `textPayload`
+to `jsonPayload.message`. `gcloud run services logs read` and a plain search
+for `AUDIT` still work, but any saved query or alert that filters on
+`textPayload` needs that one field renamed.
+
 ### 7.3 Alerts to have (one-time setup in the Cloud console)
 
 | Alert | How |
 |---|---|
 | Site can't answer questions | Monitoring > Uptime checks > HTTPS GET `/api/health` on the service URL, every 5 min, alert after 2 failures. `/api/health` returns 503 when the database, index or embedder is unusable. |
-| Nightly re-index failed | Monitoring > Alerting > log-based alert on `resource.type="cloud_run_job" AND resource.labels.job_name="ecen-reindex" AND severity>=ERROR`. This job failed silently for 36 nights once. |
+| Nightly re-index failed | Monitoring > Alerting > metric `run.googleapis.com/job/completed_execution_count` filtered to `job_name="ecen-reindex"` and `result="failed"`, alert when > 0. Use the metric, not a log severity filter: the job (`ingest.py`) still logs plain text, which Cloud Logging stores without a severity. This job failed silently for 36 nights once. |
 | Error spike | Log-based alert on `resource.labels.service_name="ecen-chatbot" AND severity>=ERROR`, more than 10 in 10 min. Works now that logs carry severity. |
 | LLM spend | A hard monthly limit on the OpenAI project, plus a GCP billing budget alert. |
 
 ### 7.4 Dependencies
 
-`constraints.txt` pins every Python package in the image. Refresh it from a
+`pinned-requirements.txt` pins every Python package in the image. Refresh it from a
 build you trust with `./scripts/lock_deps.sh`, commit, and let Dependabot
 propose updates. Run the eval suite on Dependabot PRs that touch `torch`,
 `transformers`, `sentence-transformers` or `openai` before merging.

@@ -1,4 +1,6 @@
 # Exact versions for every Python package in the production image.
+# (A pip CONSTRAINTS file, used with `pip install -c`. The name ends in
+# requirements.txt because that is the pattern Dependabot scans for.)
 #
 # backend/requirements.txt and crawler/requirements.txt say WHAT we depend on
 # (mostly unpinned). This file says WHICH VERSION, so two builds of the same

@@ -171,3 +171,31 @@ def test_feedback_row_is_written(fake_db):
     analytics.record_feedback(request_id="r", ip_hash="h", rating="down",
                               question="q", answer_preview="a")
     assert any(s.startswith("INSERT INTO chat_feedback") for s, _ in fake_db.executed)
+
+
+def test_rows_are_dropped_not_queued_forever_when_the_backlog_is_full(monkeypatch):
+    submitted = []
+
+    class _Exec:
+        def submit(self, fn, *a):
+            submitted.append(a)  # never runs: simulates a stuck database
+
+    monkeypatch.setattr(analytics, "_executor", _Exec())
+    monkeypatch.setattr(analytics, "ENABLED", True)
+    monkeypatch.setattr(analytics, "MAX_BACKLOG", 3)
+    monkeypatch.setattr(analytics, "_backlog", 0)
+    for _ in range(10):
+        analytics._submit("INSERT", ())
+    assert len(submitted) == 3
+
+
+def test_uvicorn_loggers_use_the_same_handler(monkeypatch):
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    root_before = logging.getLogger().handlers[:]
+    try:
+        obs.setup_logging()
+        root_handler = logging.getLogger().handlers[0]
+        for name in ("uvicorn.error", "uvicorn.access"):
+            assert logging.getLogger(name).handlers == [root_handler]
+    finally:
+        logging.getLogger().handlers[:] = root_before

@@ -5,7 +5,7 @@
 version: 2
 updates:
   - package-ecosystem: pip
-    directory: "/"            # constraints.txt
+    directory: "/"            # pinned-requirements.txt, requirements-test.txt
     schedule: { interval: weekly, day: monday }
     open-pull-requests-limit: 3
     groups:

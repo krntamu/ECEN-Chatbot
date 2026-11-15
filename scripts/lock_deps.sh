@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Freeze the Python package versions of a known-good image into constraints.txt.
+# Freeze the Python package versions of a known-good image into pinned-requirements.txt.
 #
 # Usage:
 #   ./scripts/lock_deps.sh                 # uses the image the Cloud Run service is running
@@ -20,10 +20,10 @@ if [[ -z "$IMAGE" ]]; then
   gcloud auth configure-docker "${IMAGE%%/*}" --quiet >/dev/null
 fi
 
-header="$(grep '^#' constraints.txt || true)"
+header="$(grep '^#' pinned-requirements.txt || true)"
 frozen="$(docker run --rm --entrypoint python "$IMAGE" -m pip freeze --exclude-editable)"
 if [[ -z "$frozen" ]]; then
-  echo "pip freeze returned nothing; leaving constraints.txt untouched" >&2
+  echo "pip freeze returned nothing; leaving pinned-requirements.txt untouched" >&2
   exit 1
 fi
 {
@@ -32,5 +32,5 @@ fi
   echo "# Frozen from: $IMAGE"
   echo "# On: $(date -u +%Y-%m-%d)"
   echo "$frozen"
-} > constraints.txt
-echo "Wrote $(echo "$frozen" | wc -l | tr -d ' ') pins to constraints.txt"
+} > pinned-requirements.txt
+echo "Wrote $(echo "$frozen" | wc -l | tr -d ' ') pins to pinned-requirements.txt"

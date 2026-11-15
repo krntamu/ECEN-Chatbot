@@ -59,7 +59,7 @@ by research area" queries so enumerations aren't capped or cut off.
   into a chat response. Links in answers are allowlisted in `frontend/lib/safeLinks.ts`.
 
 ## Known open issues (see git history / memory for detail)
-- `constraints.txt` is empty until `scripts/lock_deps.sh` is run against a good image.
+- `pinned-requirements.txt` is empty until `scripts/lock_deps.sh` is run against a good image.
 - Fine-tuned embedder may be incomplete; base model in use.
 - `FINAL_TOP_K` / `LIST_TOP_K` tuning is ongoing.
 - News chunks carry no publish date, so old news can rank as if current.

@@ -16,17 +16,30 @@ const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8000";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  let ok = false;
+// This endpoint is public and each uncached call costs a database round trip,
+// so the result is reused briefly. An uptime monitor polls every few minutes;
+// anyone hammering it gets the cached answer instead of a query per request.
+const CACHE_MS = 15_000;
+let cached: { ok: boolean; at: number } | null = null;
+
+async function probe(): Promise<boolean> {
   try {
     const res = await fetch(`${BACKEND_URL}/health/deep`, {
       cache: "no-store",
       signal: AbortSignal.timeout(8_000),
     });
-    ok = res.ok;
+    return res.ok;
   } catch {
-    ok = false;
+    return false;
   }
+}
+
+export async function GET() {
+  const now = Date.now();
+  if (!cached || now - cached.at > CACHE_MS) {
+    cached = { ok: await probe(), at: now };
+  }
+  const ok = cached.ok;
   return Response.json(
     { status: ok ? "ok" : "unavailable" },
     { status: ok ? 200 : 503, headers: { "Cache-Control": "no-store" } },
