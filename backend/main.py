@@ -33,14 +33,16 @@ from graph_retriever import (
     graph_query, build_area_roster, build_intersection_roster, is_full_faculty_query,
     build_full_faculty_roster, faculty_roster_sources, research_area_names,
     is_degree_list_query, build_degree_roster, find_faculty_mentions,
-    is_area_list_query, build_area_list_roster,
+    is_area_list_query, build_area_list_roster, unknown_person_notice,
 )
 from scheduler import create_scheduler, run_reindex
 import scheduler as _scheduler
 
-logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(message)s")
+import analytics
+import obs
+
+# JSON lines with severity + request ID on Cloud Run, readable text locally.
+obs.setup_logging()
 log = logging.getLogger(__name__)
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────
@@ -143,6 +145,10 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
 ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
+# Tags every request (and every log line it produces) with an ID, returned to
+# the caller as X-Request-ID.
+app.add_middleware(obs.RequestIdMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -158,7 +164,13 @@ class HistoryTurn(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=3, max_length=1000, example="Who are the AI/ML faculty?")
+    # min_length=1, not 3: "Hi" is two characters and _CHITCHAT_RE explicitly
+    # lists it as a greeting, but the validator rejected it with a 422 before
+    # the router ever ran — so the single most common opening message got an
+    # empty response (adversarial eval case R.1). Short junk ("ab") is still
+    # handled downstream by the normal no-reliable-context path, which is the
+    # right place for it; length is a poor proxy for meaninglessness.
+    question: str = Field(..., min_length=1, max_length=1000, example="Who are the AI/ML faculty?")
     section_filter: Optional[str] = Field(
         None,
         description="Restrict retrieval to a section: people | research | academics | admissions | news | events | about",
@@ -317,25 +329,38 @@ async def feedback(request: Request, req: FeedbackRequest):
     else:
         _STATS["feedback_down"] += 1
     ip = _client_ip(request)
+    ip_hash = hashlib.sha256(ip.encode()).hexdigest()[:12]
     log.info("FEEDBACK %s", _j.dumps({
         "rating": req.rating,
-        "ip_hash": hashlib.sha256(ip.encode()).hexdigest()[:12],
+        "ip_hash": ip_hash,
         "question": req.question[:300],
         "answer_preview": req.answer[:300],
     }))
+    analytics.record_feedback(
+        request_id=obs.current_request_id(), ip_hash=ip_hash, rating=req.rating,
+        question=req.question[:1000], answer_preview=req.answer[:2000])
     return {"ok": True}
 
 
 @app.get("/admin/stats", dependencies=[Depends(require_admin)])
-async def stats():
-    """Lightweight usage counters since this instance started."""
-    return {
+async def stats(days: int = 7):
+    """Usage numbers. The top-level counters are in-memory since this instance
+    started (unchanged shape). `durable` comes from the chat_log /
+    chat_feedback tables and covers every instance over the last `days` days,
+    including the unanswered questions and thumbs-down answers worth reviewing."""
+    import asyncio
+    body = {
         "questions": _STATS["questions"],
         "intents": dict(_STATS["intents"]),
         "flags": dict(_STATS["flags"]),
         "feedback": {"up": _STATS["feedback_up"], "down": _STATS["feedback_down"]},
         "cache_hits": _STATS["cache_hits"],
     }
+    try:
+        body["durable"] = await asyncio.to_thread(analytics.summary, days)
+    except Exception as e:  # noqa: BLE001
+        body["durable"] = {"error": f"unavailable ({type(e).__name__})"}
+    return body
 
 
 @app.post("/report-issue")
@@ -377,7 +402,10 @@ async def report_issue(request: Request, req: ReportRequest):
 
 # URLs of synthetic, code-generated context chunks — excluded from cited sources.
 _SYNTHETIC_URLS = {"knowledge-graph", "research-area-roster", "faculty-roster",
-                   "degree-roster", "research-area-list", "about:eira"}
+                   "degree-roster", "research-area-list", "about:eira",
+                   # Unknown-person guardrail notice — an instruction to the
+                   # model, never a citable page.
+                   "directory-check"}
 # Roster paths supply their own already-curated, relevant source list — keep all
 # of those; only the open-ended retrieval path needs trimming.
 _ROSTER_URLS = {"research-area-roster", "faculty-roster", "degree-roster",
@@ -592,9 +620,11 @@ def _cache_put(key: str, answer: str, sources: list) -> None:
 
 
 def _audit(request: Request, question: str, resolved: str, route: Optional[dict],
-           sources: list[dict], answer: str, flagged: str = "") -> None:
-    """Structured audit record → Cloud Logging. IP is hashed (privacy), answer
-    truncated. One line per request, greppable via 'AUDIT'."""
+           sources: list[dict], answer: str, flagged: str = "",
+           started: Optional[float] = None) -> None:
+    """Structured audit record → Cloud Logging + the chat_log table. IP is
+    hashed (privacy), answer truncated. One line per request, greppable via
+    'AUDIT'. `started` is the perf_counter() at request start, for latency."""
     import hashlib
     import json as _j
     _STATS["questions"] += 1
@@ -602,16 +632,28 @@ def _audit(request: Request, question: str, resolved: str, route: Optional[dict]
     if flagged:
         _STATS["flags"][flagged] += 1
     ip = _client_ip(request)
+    ip_hash = hashlib.sha256(ip.encode()).hexdigest()[:12]
+    latency_ms = (int((_time.perf_counter() - started) * 1000)
+                  if started is not None else None)
+    intent = (route or {}).get("intent")
+    source_urls = [s.get("url", "") for s in sources][:10]
+    resolved_or_none = resolved if resolved != question else None
     log.info("AUDIT %s", _j.dumps({
-        "ip_hash": hashlib.sha256(ip.encode()).hexdigest()[:12],
+        "ip_hash": ip_hash,
         "question": question[:300],
-        "resolved": resolved[:300] if resolved != question else None,
-        "intent": (route or {}).get("intent"),
+        "resolved": resolved_or_none[:300] if resolved_or_none else None,
+        "intent": intent,
         "flagged": flagged or None,
-        "sources": [s.get("url", "") for s in sources][:10],
+        "sources": source_urls,
         "answer_chars": len(answer),
         "answer_preview": answer[:300],
+        "latency_ms": latency_ms,
     }))
+    analytics.record_chat(
+        request_id=obs.current_request_id(), ip_hash=ip_hash,
+        question=question[:1000], resolved=resolved_or_none, intent=intent,
+        flagged=flagged or None, sources=source_urls, answer_chars=len(answer),
+        answer_preview=answer[:2000], latency_ms=latency_ms)
 
 
 # Context for small talk ("who are you", "hi", "what can you do") — answered
@@ -635,6 +677,30 @@ _IDENTITY_CHUNK = {
 
 async def _prepare_chunks(req: "ChatRequest", route: Optional[dict] = None,
                           prefetched: Optional[list] = None) -> list[dict]:
+    """Assemble context chunks, then apply cross-cutting guardrails.
+
+    Thin wrapper around `_prepare_chunks_inner` so a guardrail can be applied to
+    EVERY dispatch path without editing each of its ~10 return statements.
+    """
+    chunks = await _prepare_chunks_inner(req, route, prefetched)
+
+    # A titled person who isn't in the directory ("professor John Doesnotexist").
+    # Prepended rather than short-circuiting: retrieval still runs, so a real
+    # professor missing from graph.json can still be answered from their profile
+    # page — the notice only forbids substituting a look-alike name. Scored
+    # above the roster chunks (10.0) so it leads the context.
+    # See graph_retriever.unknown_person_notice (adversarial eval case 11.3).
+    notice = unknown_person_notice(req.question)
+    if notice:
+        log.info("Unknown-person guardrail fired for %r", req.question)
+        return [{"url": "directory-check", "title": "Directory check",
+                 "section": "graph", "text": notice,
+                 "rerank_score": 20.0}] + chunks
+    return chunks
+
+
+async def _prepare_chunks_inner(req: "ChatRequest", route: Optional[dict] = None,
+                                prefetched: Optional[list] = None) -> list[dict]:
     """Assemble the context chunks for a question.
 
     Dispatch order: the LLM route (intent + topic) when available, falling back
@@ -991,7 +1057,8 @@ async def chat_stream(request: Request, req: ChatRequest):
                  _t.perf_counter() - _llm_t0, _t.perf_counter() - _t_req, len(answer_acc))
         if ckey and emitted > 0 and answer_acc:
             _cache_put(ckey, answer_acc, sources)
-        _audit(request, req.question, search_req.question, route, sources, answer_acc)
+        _audit(request, req.question, search_req.question, route, sources,
+               answer_acc, started=_t_req)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

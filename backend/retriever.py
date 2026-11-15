@@ -946,6 +946,7 @@ _SCAFFOLD = {
     "can", "could", "please", "tell", "show", "give", "me", "us", "there",
     "any", "some", "at", "tamu", "ece", "department", "dept", "university",
     "work", "works", "working", "research", "researches", "researching",
+    "teach", "teaches", "teaching", "taught", "lecture", "lectures",
     "study", "studies", "studying", "specialize", "specializes", "specializing",
     "focus", "focuses", "focusing", "interested", "expert", "experts",
     "in", "on", "into", "field", "fields", "area", "areas", "topic", "topics",
@@ -953,6 +954,23 @@ _SCAFFOLD = {
     "researcher", "researchers", "scientist", "scientists", "people", "that",
     "with", "and", "their", "his", "her", "doing", "involved", "focused",
     "instructor", "instructors", "member", "members", "staff",
+    # Degree-program scaffolding. A resolved follow-up ("faculty involved in
+    # THIS PROGRAM" → "...in the Master of Science in Microelectronics and
+    # Semiconductors program") otherwise contributes "program"/"degree"/
+    # demonstratives as topic words, diluting the research-area match below the
+    # 60% overlap threshold in build_area_roster. NOTE: the degree TITLE itself
+    # ("Master of Science") is stripped as a phrase by _DEGREE_TITLE_RE, not
+    # listed here — "science" must survive as a topic word for the real area
+    # "Information Science and Learning Systems".
+    "program", "programs", "programme", "degree", "degrees", "track", "tracks",
+    "this", "these", "those", "it", "its", "offer", "offers", "offered",
+    "online", "campus", "thesis", "concentration", "specialization",
+    # Conversational filler. "Can you tell me about the faculty in X" left
+    # "you" and "about" in the topic, so a 2-word subject scored 2/4 = 50%
+    # against build_area_roster's 60% overlap threshold and failed. Note
+    # "information" is deliberately NOT listed — it names a real area.
+    "you", "your", "about", "know", "more", "regarding", "concerning",
+    "would", "want", "need", "just", "also", "like", "curious",
     "should", "i", "if", "am", "my", "reach", "out", "contact", "talk",
     "speak", "connect", "touch", "get", "someone", "anyone", "suggest",
     "recommend", "advisor", "adviser", "mentor", "email", "whom",
@@ -974,6 +992,34 @@ _PEOPLE_PLURAL = {
     "professors", "faculty", "faculties", "researchers", "scientists", "profs",
     "instructors", "members",
 }
+
+# Degree titles stripped as PHRASES before topic extraction.
+#
+# Why a phrase regex instead of more _SCAFFOLD words: "science" is a real topic
+# word (the research area "Information Science and Learning Systems"), so
+# blanket-listing it would break "who works in information science". Removing
+# only the bound phrase "Master of Science" leaves "science" available
+# elsewhere in the query.
+#
+# Observed failure this fixes (2026-08-09): the 3-turn chain
+#   "What MS and PhD programs does TAMU ECE offer?"
+#   "Tell me about the Microelectronics and Semiconductors MS program"
+#   "Can you tell me about the faculty involved in this program?"
+# resolved turn 3 to "...faculty involved in the Master of Science in
+# Microelectronics and Semiconductors program", which produced the topic
+# ["master","science","microelectronics","semiconductors","program"]. Only 2 of
+# 5 words name the actual subject, so the roster path bailed and generic
+# retrieval matched college-wide "Faculty-led Programs" / "For Faculty" pages
+# on the bare word "faculty".
+_DEGREE_TITLE_RE = re.compile(
+    r"\b(?:master|masters|master's|bachelor|bachelors|bachelor's|doctor|doctorate)"
+    r"\s+of\s+(?:science|engineering|philosophy|arts)\b"
+    r"|\bph\.?\s?d\.?\b"
+    r"|\bm\.?\s?eng\b|\bb\.?\s?eng\b"
+    r"|\bm\.?s\.?c?\.?(?=\s|$)"
+    r"|\bb\.?s\.?(?=\s|$)",
+    re.IGNORECASE,
+)
 _RESEARCH_VERBS = {
     "research", "researches", "researching", "work", "works", "working",
     "study", "studies", "studying", "specialize", "specializes",
@@ -1006,9 +1052,14 @@ def _people_area_topic(query: str) -> Optional[list[str]]:
     has_research_verb = bool(tokens & _RESEARCH_VERBS)
     has_area_prep = bool(re.search(r"\b(in|on|area of|field of|working on|focused on)\b", ql))
 
-    # Extract the topic first: everything that isn't query scaffolding.
+    # Extract the topic: everything that isn't query scaffolding. Degree titles
+    # are removed as whole phrases FIRST (see _DEGREE_TITLE_RE) so that a
+    # follow-up naming a degree program contributes only the subject words.
+    # Stripping is applied to a copy — the trigger signals above deliberately
+    # still see the original wording.
+    topic_src = _DEGREE_TITLE_RE.sub(" ", ql)
     topic = []
-    for w in re.findall(r"[a-z0-9+&-]+", ql):
+    for w in re.findall(r"[a-z0-9+&-]+", topic_src):
         if w in _SCAFFOLD:
             continue
         topic.extend(_TOPIC_ALIASES.get(w, [w]))
@@ -1107,6 +1158,15 @@ _AREA_SIGNALS: dict[str, list[tuple[str, float]]] = {
     ],
     "chip manufacturing": [
         ("semiconductor manufacturing", 3.0), ("chip manufacturing", 3.0),
+        # "Microelectronics and Semiconductors" is the name of a DEGREE PROGRAM
+        # (MS MESC), not one of the 11 research areas — so a question about that
+        # program's faculty had no area to route to and fell through to generic
+        # retrieval. Mapping the program's vocabulary onto this area gives it a
+        # real, sourced roster. Bare "semiconductor" sits at 2.0 (== the
+        # MIN_SIGNAL_SCORE floor) so a single mention qualifies a profile; the
+        # more specific phrases above still outrank it for core-tier grading.
+        ("microelectronics", 3.0), ("microelectronic", 3.0),
+        ("semiconductor", 2.0),
         ("fabrication", 2.0), ("lithography", 2.0), ("vlsi", 2.0),
         ("process technology", 2.0), ("packaging", 2.0), ("yield", 1.0),
     ],
@@ -1118,6 +1178,77 @@ _AREA_SIGNALS: dict[str, list[tuple[str, float]]] = {
 MIN_SIGNAL_SCORE = float(os.getenv("AREA_MIN_SIGNAL_SCORE", "2.0"))
 
 
+# ── Typo tolerance for topic words (adversarial eval case R.3) ───────────────
+# "who r the machne lerning profs" dead-ended in the no-info fallback. The
+# faculty-by-area path builds EXACT `ILIKE '%machne%'` patterns, which match
+# nothing, so the roster came back empty and retrieval had no context.
+#
+# ENABLE_FUZZY does not help: that flag adds a pg_trgm arm over chunk TEXT
+# during retrieval, and this query never gets that far. Measured 2026-08-09, it
+# also cost ~1s of db_arms plus 10-15 extra cross-encoder pairs — so correcting
+# the handful of topic words in-process is both cheaper and the only thing that
+# actually fixes this.
+#
+# Deliberately NOT a general spellchecker: we only snap a word onto vocabulary
+# the department actually uses (research-area names and their signal terms).
+# An unrecognized word is left alone, so novel topics still reach the generic
+# fallback unchanged.
+def _area_vocabulary() -> set:
+    global _AREA_VOCAB
+    if _AREA_VOCAB is None:
+        vocab = set()
+        for key, sigs in _AREA_SIGNALS.items():
+            vocab.update(w for w in key.split() if len(w) > 3)
+            for term, _ in sigs:
+                vocab.update(w for w in term.split() if len(w) > 3)
+        _AREA_VOCAB = vocab
+    return _AREA_VOCAB
+
+
+_AREA_VOCAB: Optional[set] = None
+# Levenshtein budget by word length. One edit for short words, two for longer
+# ones ("lerning" -> "learning" is 1; "artifical" -> "artificial" is 1;
+# "inteligence" -> "intelligence" is 1). Anything looser starts mapping
+# genuinely different words onto each other.
+_TYPO_MAX_EDITS = ((7, 1), (99, 2))
+
+
+def _correct_topic_word(word: str) -> str:
+    """Snap `word` to the nearest department vocabulary term, or return it as-is."""
+    if len(word) < 4:
+        return word
+    vocab = _area_vocabulary()
+    if word in vocab:
+        return word
+    budget = next(b for n, b in _TYPO_MAX_EDITS if len(word) <= n)
+    best, best_d = word, budget + 1
+    for cand in sorted(vocab):  # sorted → deterministic pick when distances tie
+        if abs(len(cand) - len(word)) > budget:
+            continue
+        d = _edit_distance(cand, word, budget)
+        if d < best_d:
+            best, best_d = cand, d
+            if d == 1:
+                break
+    return best if best_d <= budget else word
+
+
+def _edit_distance(a: str, b: str, budget: int) -> int:
+    """Levenshtein with early exit once the best row exceeds `budget`."""
+    if a == b:
+        return 0
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1,
+                           prev[j - 1] + (ca != cb)))
+        if min(cur) > budget:
+            return budget + 1
+        prev = cur
+    return prev[-1]
+
+
 def _signal_terms(topic_words: list[str]) -> list[tuple[str, float]]:
     """Map a query topic to (term, weight) signals to score profiles against.
 
@@ -1126,6 +1257,14 @@ def _signal_terms(topic_words: list[str]) -> list[tuple[str, float]]:
     significant word (weak) so the behavior generalizes without a hand-built
     entry for every possible topic.
     """
+    # Typo-correct against department vocabulary before any matching, so
+    # "machne lerning" reaches the AI/ML signal set instead of dead-ending.
+    # Unrecognized words pass through untouched (see _correct_topic_word).
+    corrected = [_correct_topic_word(w.lower()) for w in topic_words]
+    if corrected != [w.lower() for w in topic_words]:
+        log.info("Typo-corrected topic %s -> %s", topic_words, corrected)
+    topic_words = corrected
+
     joined = " ".join(topic_words).lower().strip()
     if not joined:
         return []

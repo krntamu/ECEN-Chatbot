@@ -6,7 +6,7 @@ programs, admissions, news, events).
 
 ## Stack
 - **Backend:** Python, FastAPI + Uvicorn, APScheduler
-- **Frontend:** Next.js 15 (App Router), TypeScript, Tailwind
+- **Frontend:** Next.js 14 (App Router), TypeScript, Tailwind
 - **Vector DB:** PostgreSQL + pgvector (`pgvector/pgvector:pg16`), table `ecen_docs`, HNSW index
 - **Embeddings:** `sentence-transformers/all-MiniLM-L6-v2` (384-dim, local)
 - **LLM:** TAMU gateway `https://chat-api.tamu.ai/openai`, model `protected.gpt-5` (reasoning model)
@@ -33,15 +33,21 @@ by research area" queries so enumerations aren't capped or cut off.
 | `backend/scheduler.py` | APScheduler daily re-index (2AM) |
 | `frontend/components/ChatUI.tsx` | Streaming chat UI, section filter, source badges |
 | `frontend/app/api/chat/route.ts` | Next.js proxy to FastAPI |
+| `backend/obs.py` | JSON logging, request IDs |
+| `backend/analytics.py` | Durable question/feedback log (Postgres) |
 | `scripts/check_db.py` | DB health check |
+| `scripts/smoke.sh` | Post-deploy smoke test against the public URL |
 | `scripts/rebuild.sh` | DB check → ingest → graph_builder |
 
 ## How to verify a change (use these, don't merge without them)
-- **Python compiles:** `python -m py_compile backend/*.py crawler/*.py`
+- **Python compiles:** `python -m py_compile backend/*.py crawler/*.py scripts/*.py tests/*.py`
+- **Unit tests:** `pip install -r requirements-test.txt && python -m pytest -q`
+  (heavy deps are stubbed; no database or model weights needed)
 - **Backend should stay import-clean.** Changes to `retriever.py`, `generator.py`,
   or `graph_retriever.py` can affect roster injection / answer completeness — reason
   about those paths carefully.
-- **Frontend builds:** `cd frontend && npm install && npm run build`
+- **Frontend:** `cd frontend && npm install --legacy-peer-deps && npm test && npm run build`
+- `.github/workflows/ci.yml` runs all of the above on every PR.
 - DB config lives in `.env` (NOT committed). Dockerized pgvector runs on host port
   **5433** (native Postgres occupies 5432). Don't hardcode credentials.
 
@@ -49,8 +55,12 @@ by research area" queries so enumerations aren't capped or cut off.
 - Open a PR on branch `claude/fix-issue-<number>`. **Never** push to `main` or merge.
 - Never commit `.env`, API keys, DSNs, or model weight files.
 - Prefer the smallest correct fix; explain root cause in the PR body.
+- Analytics (`backend/analytics.py`) must never run on the request path or raise
+  into a chat response. Links in answers are allowlisted in `frontend/lib/safeLinks.ts`.
 
 ## Known open issues (see git history / memory for detail)
-- CORS is `allow_origins=["*"]` — needs tightening for production.
+- `pinned-requirements.txt` is empty until `scripts/lock_deps.sh` is run against a good image.
 - Fine-tuned embedder may be incomplete; base model in use.
 - `FINAL_TOP_K` / `LIST_TOP_K` tuning is ongoing.
+- News chunks carry no publish date, so old news can rank as if current.
+- Rate limiter and answer cache are in-memory per instance.

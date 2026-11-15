@@ -43,6 +43,9 @@ crawler/.cache/
 crawler/raw/
 *.sqlite
 *.db
+# Postgres dumps (ecen_backup.sql, ecen_YYYY-MM-DD.sql). ~12 MB of chunk text
+# and 384-dim embeddings — never belongs in git.
+*.sql
 
 # ───────────── Backups / scratch ─────────────
 *.bak
@@ -60,3 +63,6 @@ Thumbs.db
 
 # ───────────── Eval reports (generated) ─────────────
 eval_reports/
+
+# Schema migrations ARE source — only data dumps are ignored.
+!scripts/migrations/*.sql

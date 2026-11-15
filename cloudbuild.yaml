@@ -36,15 +36,42 @@ steps:
       - '--min-instances=${_MIN_INSTANCES}'
       - '--max-instances=4'
       - '--memory=4Gi'
+      # 2, not 4. Measured 2026-08-09: the cross-encoder does NOT scale with
+      # cores — per-pair cost stayed ~150ms at both 2 and 4 vCPU, so the extra
+      # cores were pure cost. Latency comes down by sending fewer pairs
+      # (_RETRIEVAL_TUNING below), not by adding CPU.
       - '--cpu=2'
       - '--cpu-boost'
+      # Retrieval/latency tuning, pinned so a build can't silently revert it.
+      # Baseline was ~8.6s of cross-encoding per request at ~56 pairs.
+      #   DENSE_TOP_K 40->25, KEYWORD_TOP_K 20->10  : fewer candidate pairs,
+      #     and cross-encode time is linear in pair count.
+      #   RERANK_MAX_LEN 512->384 : shorter sequences per pair. Do NOT drop to
+      #     256 — a previous attempt measurably hurt ranking quality.
+      #   TORCH_NUM_THREADS must match --cpu; the code defaults to 4, which
+      #     oversubscribed the 2 allocated cores.
+      #   ENABLE_FUZZY=0 : the pg_trgm arm cost ~1s of db_arms plus 10-15 extra
+      #     cross-encoder pairs and did not fix the typo case it was meant to
+      #     (see the typo correction in retriever._signal_terms instead).
+      - '--update-env-vars=${_RETRIEVAL_TUNING}'
       - '--timeout=600'
+      # Mounts the Cloud SQL Unix socket at /cloudsql/<connection-name>. PG_DSN
+      # (set as an env var on the service, not here — it holds the password)
+      # points at that path. Without this flag a deploy silently drops the
+      # attachment and every question fails with "No such file or directory".
+      - '--add-cloudsql-instances=${_CLOUDSQL_INSTANCE}'
       - '--quiet'
 
   # Keep the nightly re-index job on the same image. `jobs deploy` creates the
   # job on first run and updates it afterwards. Env vars set manually on the
   # job (PG_DSN) persist across deploys; --update-env-vars only touches the
   # listed keys.
+  #
+  # NOTE: the job's env vars are a SEPARATE set from the service's, and nothing
+  # reconciles them. A password rotated on the service but not here is what
+  # broke the nightly re-index for 36 straight nights (2026-07-05 → 08-09) and
+  # let the idle Supabase project auto-pause. Rotate PG_DSN in BOTH places, or
+  # move both to one Secret Manager secret.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
     id: DeployReindexJob
     entrypoint: gcloud
@@ -62,6 +89,9 @@ steps:
       - '--command=sh'
       - '--args=-c,cd /app/crawler && python ingest.py --diff'
       - '--update-env-vars=EMBEDDING_MODEL=all-MiniLM-L6-v2'
+      # `jobs deploy` rewrites job config, so the socket attachment must be
+      # declared here or it is lost on the next build.
+      - '--set-cloudsql-instances=${_CLOUDSQL_INSTANCE}'
       - '--quiet'
 
 images:
@@ -84,3 +114,11 @@ substitutions:
   # Set to 0: scale to zero, no idle charge. Flip to 1 if cold starts become a
   # problem and you'd rather pay to keep one instance warm.
   _MIN_INSTANCES: '0'
+  # Cloud SQL instance backing ecen_docs (migrated off Supabase 2026-08-09).
+  # Format is project:region:instance. The password lives only in the PG_DSN
+  # env var on the service and the job — never in this file.
+  _CLOUDSQL_INSTANCE: gcp-clen-ecen-ai-initiatives:us-central1:ecen-pg
+  # Retrieval latency knobs — see the comment on the Deploy step. Only these
+  # keys are touched (--update-env-vars merges), so PG_DSN and the API keys set
+  # manually on the service are preserved across builds.
+  _RETRIEVAL_TUNING: 'DENSE_TOP_K=25,KEYWORD_TOP_K=10,RERANK_MAX_LEN=384,TORCH_NUM_THREADS=2,ENABLE_FUZZY=0'

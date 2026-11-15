@@ -1,0 +1,17 @@
+# Exact versions for every Python package in the production image.
+# (A pip CONSTRAINTS file, used with `pip install -c`. The name ends in
+# requirements.txt because that is the pattern Dependabot scans for.)
+#
+# backend/requirements.txt and crawler/requirements.txt say WHAT we depend on
+# (mostly unpinned). This file says WHICH VERSION, so two builds of the same
+# commit produce the same image. Without it, every Cloud Build silently picks
+# up whatever was released that morning: a new major of openai, transformers
+# or torch can break retrieval with no code change and nothing to bisect.
+#
+# It starts empty on purpose. Pins should come from an image that is known to
+# work, not from "latest today". Fill it from the currently deployed image:
+#
+#     ./scripts/lock_deps.sh
+#
+# then commit the result. Dependabot (.github/dependabot.yml) will open PRs to
+# move the pins forward; run the eval suite on those before merging.
