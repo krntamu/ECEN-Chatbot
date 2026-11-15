@@ -294,8 +294,13 @@ def test_admin_rejects_a_wrong_token(client):
 
 @pytest.mark.parametrize("payload", [
     {},                                  # missing question
-    {"question": "a"},                   # below min_length
+    {"question": ""},                    # below min_length
     {"question": "x" * 2000},            # above max_length
 ])
+# NOTE: {"question": "a"} used to belong here, back when min_length was 3. That
+# bound also rejected "Hi" — a greeting _CHITCHAT_RE explicitly handles — so the
+# floor moved to 1 (adversarial eval case R.1). Short-but-meaningless input is
+# now answered by the normal no-reliable-context path instead of a 422, which is
+# the honest place for it; length was never a good proxy for meaninglessness.
 def test_malformed_requests_still_422(client, payload):
     assert client.post("/chat", json=payload).status_code == 422

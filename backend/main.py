@@ -33,7 +33,7 @@ from graph_retriever import (
     graph_query, build_area_roster, build_intersection_roster, is_full_faculty_query,
     build_full_faculty_roster, faculty_roster_sources, research_area_names,
     is_degree_list_query, build_degree_roster, find_faculty_mentions,
-    is_area_list_query, build_area_list_roster,
+    is_area_list_query, build_area_list_roster, unknown_person_notice,
 )
 from scheduler import create_scheduler, run_reindex
 import scheduler as _scheduler
@@ -158,7 +158,13 @@ class HistoryTurn(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=3, max_length=1000, example="Who are the AI/ML faculty?")
+    # min_length=1, not 3: "Hi" is two characters and _CHITCHAT_RE explicitly
+    # lists it as a greeting, but the validator rejected it with a 422 before
+    # the router ever ran — so the single most common opening message got an
+    # empty response (adversarial eval case R.1). Short junk ("ab") is still
+    # handled downstream by the normal no-reliable-context path, which is the
+    # right place for it; length is a poor proxy for meaninglessness.
+    question: str = Field(..., min_length=1, max_length=1000, example="Who are the AI/ML faculty?")
     section_filter: Optional[str] = Field(
         None,
         description="Restrict retrieval to a section: people | research | academics | admissions | news | events | about",
@@ -377,7 +383,10 @@ async def report_issue(request: Request, req: ReportRequest):
 
 # URLs of synthetic, code-generated context chunks — excluded from cited sources.
 _SYNTHETIC_URLS = {"knowledge-graph", "research-area-roster", "faculty-roster",
-                   "degree-roster", "research-area-list", "about:eira"}
+                   "degree-roster", "research-area-list", "about:eira",
+                   # Unknown-person guardrail notice — an instruction to the
+                   # model, never a citable page.
+                   "directory-check"}
 # Roster paths supply their own already-curated, relevant source list — keep all
 # of those; only the open-ended retrieval path needs trimming.
 _ROSTER_URLS = {"research-area-roster", "faculty-roster", "degree-roster",
@@ -635,6 +644,30 @@ _IDENTITY_CHUNK = {
 
 async def _prepare_chunks(req: "ChatRequest", route: Optional[dict] = None,
                           prefetched: Optional[list] = None) -> list[dict]:
+    """Assemble context chunks, then apply cross-cutting guardrails.
+
+    Thin wrapper around `_prepare_chunks_inner` so a guardrail can be applied to
+    EVERY dispatch path without editing each of its ~10 return statements.
+    """
+    chunks = await _prepare_chunks_inner(req, route, prefetched)
+
+    # A titled person who isn't in the directory ("professor John Doesnotexist").
+    # Prepended rather than short-circuiting: retrieval still runs, so a real
+    # professor missing from graph.json can still be answered from their profile
+    # page — the notice only forbids substituting a look-alike name. Scored
+    # above the roster chunks (10.0) so it leads the context.
+    # See graph_retriever.unknown_person_notice (adversarial eval case 11.3).
+    notice = unknown_person_notice(req.question)
+    if notice:
+        log.info("Unknown-person guardrail fired for %r", req.question)
+        return [{"url": "directory-check", "title": "Directory check",
+                 "section": "graph", "text": notice,
+                 "rerank_score": 20.0}] + chunks
+    return chunks
+
+
+async def _prepare_chunks_inner(req: "ChatRequest", route: Optional[dict] = None,
+                                prefetched: Optional[list] = None) -> list[dict]:
     """Assemble the context chunks for a question.
 
     Dispatch order: the LLM route (intent + topic) when available, falling back

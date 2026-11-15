@@ -516,17 +516,48 @@ CASES: list[dict[str, Any]] = [
     },
 ]
 
+# ── Append the 100+ generated + adversarial cases (eval_cases_100.py) ─────────
+# Kept in a separate module so this file stays readable; graph-derived cases
+# there auto-update when backend/graph.json is rebuilt.
+try:
+    from eval_cases_100 import build_cases as _build_extra_cases
+    CASES.extend(_build_extra_cases())
+except Exception as _e:  # noqa: BLE001
+    print(f"[eval] warning: could not load eval_cases_100 extra cases: {_e}")
+
+
+# The adversarial suite: everything that probes the guardrails rather than the
+# knowledge base. Prompt injection and credential/system-prompt exfiltration
+# (security, injection), invented courses/faculty/statistics (hallucination),
+# questions the bot should decline or redirect (scope, out-of-scope,
+# out-of-domain), and malformed or hostile input (robustness, input-validation,
+# edge). These are the cases where a WRONG answer is worse than no answer.
+ADVERSARIAL_TAGS = ("security,injection,hallucination,scope,out-of-scope,"
+                    "out-of-domain,robustness,input-validation,edge")
+
 
 def run(
     priority_filter: str | None = None,
     tag_filter: str | None = None,
     delay: float = DEFAULT_DELAY,
+    limit: int | None = None,
 ) -> int:
     cases = CASES
     if priority_filter:
         cases = [c for c in cases if c["priority"] == priority_filter]
     if tag_filter:
-        cases = [c for c in cases if tag_filter in c.get("tags", [])]
+        # Comma-separated tags match ANY (union), so related-but-separately-
+        # tagged families can be run as one suite — e.g. the adversarial set is
+        # spread across security/injection/hallucination/scope/robustness and
+        # was otherwise five separate runs against a rate-limited endpoint.
+        wanted = {t.strip() for t in tag_filter.split(",") if t.strip()}
+        cases = [c for c in cases if wanted & set(c.get("tags", []))]
+    # Deterministic head-slice, not a random sample: the first ~47 cases are the
+    # curated hand-written set (identity, security, rosters, faculty facts,
+    # degrees, admissions, typos, edge cases) and carry the most signal per
+    # request. Slicing keeps two runs comparable; sampling would not.
+    if limit is not None and limit > 0:
+        cases = cases[:limit]
 
     passed = failed = 0
     rate_limit = os.getenv("CHAT_RATE_LIMIT", "10/minute")
@@ -567,11 +598,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TAMU ECE chatbot eval harness")
     parser.add_argument("--fast", action="store_true",
                         help="Run P0 cases only (smoke test)")
-    parser.add_argument("--tag", metavar="TAG",
-                        help="Only run cases with this tag (e.g. roster, security, fuzzy)")
+    parser.add_argument("--tag", metavar="TAG[,TAG...]",
+                        help="Only run cases carrying ANY of these tags "
+                             "(e.g. roster, or security,injection,hallucination)")
+    parser.add_argument("--adversarial", action="store_true",
+                        help="Shorthand for the attack/robustness suite: "
+                             f"--tag {ADVERSARIAL_TAGS}")
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY,
                         help=f"Seconds to sleep between requests (default {DEFAULT_DELAY}; use 0 locally)")
+    parser.add_argument("--limit", type=int, metavar="N",
+                        help="Run only the first N cases after filtering. Deterministic "
+                             "head-slice, so two runs with the same N are comparable.")
     args = parser.parse_args()
 
     priority = "P0" if args.fast else None
-    sys.exit(run(priority_filter=priority, tag_filter=args.tag, delay=args.delay))
+    tag = ADVERSARIAL_TAGS if args.adversarial else args.tag
+    sys.exit(run(priority_filter=priority, tag_filter=tag, delay=args.delay,
+                 limit=args.limit))

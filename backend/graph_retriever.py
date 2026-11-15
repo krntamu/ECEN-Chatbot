@@ -182,6 +182,89 @@ def find_faculty_mentions(text: str) -> list[str]:
     return [n for _, n in found]
 
 
+# ── Guardrail: a titled person who isn't in the directory ────────────────────
+# Adversarial eval case 11.3 ("Who is professor John Doesnotexist and what does
+# he teach?") did NOT get refused. Retrieval found the surname-adjacent "John
+# Dennison" in a news article and the model answered:
+#
+#   "It looks like there might be a little confusion with the name 'John
+#    Doesnotexist.' In the context provided, the professor mentioned is
+#    actually John Dennison, who teaches the fundamentals of circuit design."
+#
+# Silently substituting a DIFFERENT real person for one that doesn't exist is
+# worse than either refusing or inventing: it reads as a helpful correction, so
+# a prospective student would act on it and email the wrong professor. The
+# fabricated-celebrity cases (Dumbledore, Tony Stark, Sherlock Holmes) all
+# passed — they fail only when the fake name shares a common first name with
+# someone in the corpus.
+#
+# We do NOT hard-refuse. Faculty coverage in graph.json (70) is smaller than the
+# department's full roster, so asserting "this person does not exist" could be
+# wrong. Instead we inject a notice that forbids the substitution and lets the
+# model say it couldn't find the name.
+# The title is matched case-insensitively via a SCOPED inline flag, but the name
+# stays case-sensitive on purpose — a global re.IGNORECASE would make [A-Z]
+# match lowercase and the pattern would swallow ordinary words after "professor"
+# ("professor salaries", "professor of the year").
+_PERSON_TITLE_RE = re.compile(
+    r"\b(?i:professor|prof\.?|dr\.?|doctor|instructor)\s+"
+    r"((?:[A-Z][\w'’-]+)(?:\s+[A-Z][\w'’-]+){0,2})",
+)
+
+
+def _known_faculty_surnames(graph: dict) -> set:
+    out = set()
+    for name in graph["nodes"]["faculty"]:
+        toks = [t for t in re.findall(r"[a-z]+", name.lower())
+                if len(t) > 1 and t not in _TITLE_TOKENS]
+        if toks:
+            out.add(toks[-1])
+    return out
+
+
+def unknown_person_notice(query: str) -> str | None:
+    """Notice text when the query names a titled person absent from the graph.
+
+    Returns None unless the query uses an explicit title word ("professor X",
+    "Dr. Y") AND the named person matches no faculty member. Requiring the title
+    keeps precision high — bare capitalized words in a question are usually
+    research topics or building names, not people.
+
+    Matching is deliberately generous (full-name key overlap OR a shared
+    surname), so a real professor referred to informally is never flagged. The
+    cost of a false positive here is telling a student a real professor doesn't
+    exist, which is worse than the bug being fixed.
+    """
+    if not query:
+        return None
+    candidates = _PERSON_TITLE_RE.findall(query)
+    if not candidates:
+        return None
+
+    graph = _load_graph()
+    known_keys = [_name_key(n) for n in graph["nodes"]["faculty"]]
+    known_surnames = _known_faculty_surnames(graph)
+
+    for cand in candidates:
+        key = _name_key(cand)
+        if not key:
+            continue
+        # Known if the name overlaps a faculty key, or shares any surname.
+        if any(key & k for k in known_keys):
+            continue
+        if key & known_surnames:
+            continue
+        return (
+            f"DIRECTORY CHECK: no faculty member named \"{cand}\" appears in the "
+            "Texas A&M Electrical and Computer Engineering directory. Tell the "
+            "user you could not find anyone by that name and suggest they check "
+            "the department's people directory. Do NOT answer about a "
+            "different person whose name merely looks similar, and do not "
+            "describe what this person teaches or researches."
+        )
+    return None
+
+
 def _format_faculty(name: str, node: dict) -> str:
     lines = [f"**{name}**"]
     if node.get("titles"):
