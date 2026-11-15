@@ -32,6 +32,12 @@ COPY crawler/requirements.txt ./requirements-crawler.txt
 # constraints.txt pins exact versions so builds are reproducible (see the file
 # header; fill it with scripts/lock_deps.sh). Empty constraints = no pins.
 COPY constraints.txt ./constraints.txt
+# CPU-only PyTorch. Cloud Run has no GPU, but the default Linux wheel bundles
+# the CUDA runtime (several GB of nvidia-* packages) that is downloaded, stored
+# and pulled on every cold start for nothing. Installing torch from the CPU
+# index first means the later install sees it as already satisfied.
+RUN pip install --no-cache-dir -c constraints.txt \
+        --index-url https://download.pytorch.org/whl/cpu torch
 RUN pip install --no-cache-dir -c constraints.txt \
         -r requirements-backend.txt -r requirements-crawler.txt
 
