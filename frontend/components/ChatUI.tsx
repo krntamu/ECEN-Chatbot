@@ -5,6 +5,7 @@ import { Send, Square, User, ExternalLink, RefreshCw, Flag, X, Check, ArrowLeft 
 import ReactMarkdown from "react-markdown";
 import { parseAnswer } from "../lib/parseAnswer";
 import { FeedbackButtons } from "./FeedbackButtons";
+import { SafeLink } from "./SafeLink";
 
 interface Source { url: string; title: string; section: string; }
 interface Message { role: "user" | "assistant"; content: string; sources?: Source[]; suggestions?: string[]; feedback?: "up" | "down"; loading?: boolean; }
@@ -37,6 +38,23 @@ const SECTION_COLORS: Record<string, { bg: string; color: string }> = {
   about:      { bg: "#f3f4f6", color: "#4b5563" },
 };
 
+/** Shown under the input on both screens. An AI answer about deadlines or
+ *  requirements can be wrong or out of date, and questions are logged. */
+function Disclaimer() {
+  return (
+    <p className="disclaimer" style={{ color: "#4b5563", fontSize: "0.72rem", lineHeight: 1.5, textAlign: "center", margin: "10px auto 0", maxWidth: "580px" }}>
+      EIRA is an AI and can make mistakes. Check the linked sources before relying on an answer.
+      Questions are logged to improve EIRA, so please don&apos;t share personal information.
+    </p>
+  );
+}
+
+/** Text for screen readers: announce the finished answer once, not every
+ *  streamed token (a live region on the growing bubble re-reads it constantly). */
+function plainText(markdown: string): string {
+  return markdown.replace(/\\n/g, "\n").replace(/[*_#`>]/g, "").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+}
+
 const EXAMPLE_CARDS = [
   { icon: "🔬", category: "Research",   question: "What research areas does TAMU ECE specialize in?",    iconBg: "#ede9fe" },
   { icon: "👩‍🏫", category: "Faculty",    question: "Who are the AI & machine learning researchers?",       iconBg: "#dbeafe" },
@@ -61,6 +79,23 @@ export default function ChatUI() {
   const [reportStatus, setReportStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  useEffect(() => {
+    if (!reportOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && reportStatus !== "sending") setReportOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [reportOpen, reportStatus]);
+
+  const lastMsg = messages[messages.length - 1];
+  const liveText = !lastMsg || lastMsg.role !== "assistant" ? ""
+    : (lastMsg.loading || streaming) ? "EIRA is answering."
+    : `EIRA says: ${plainText(lastMsg.content)}`;
+  const liveRegion = (
+    <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{liveText}</div>
+  );
 
   async function submitReport() {
     if (!reportText.trim() || reportStatus === "sending") return;
@@ -96,14 +131,14 @@ export default function ChatUI() {
   const reportModal = reportOpen ? (
     <div onClick={() => reportStatus !== "sending" && setReportOpen(false)}
       style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: "1rem" }}>
-      <div onClick={e => e.stopPropagation()}
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="report-title"
         style={{ width: "100%", maxWidth: "460px", backgroundColor: BG, borderRadius: "16px", border: `1px solid ${BORDER}`, padding: "20px", boxShadow: "0 10px 40px rgba(0,0,0,0.2)" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "10px" }}>
-          <span style={{ fontWeight: 600, color: "#111111", fontSize: "0.95rem" }}>Report a problem</span>
-          <button onClick={() => setReportOpen(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "#9ca3af" }}><X size={16} /></button>
+          <span id="report-title" style={{ fontWeight: 600, color: "#111111", fontSize: "0.95rem" }}>Report a problem</span>
+          <button onClick={() => setReportOpen(false)} aria-label="Close" style={{ background: "none", border: "none", cursor: "pointer", color: "#6b7280" }}><X size={16} aria-hidden="true" /></button>
         </div>
         {reportStatus === "sent" ? (
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#15803d", padding: "12px 0", fontSize: "0.875rem" }}>
+          <div role="status" style={{ display: "flex", alignItems: "center", gap: "8px", color: "#15803d", padding: "12px 0", fontSize: "0.875rem" }}>
             <Check size={16} /> Thanks! Your report was sent to the team.
           </div>
         ) : (
@@ -112,6 +147,8 @@ export default function ChatUI() {
               Tell us what went wrong (wrong answer, missing info, an error, etc.). Your most recent question is attached automatically.
             </p>
             <textarea
+              autoFocus
+              aria-label="Describe the problem"
               value={reportText}
               onChange={e => setReportText(e.target.value)}
               placeholder="e.g. I asked for power & energy faculty and the list was cut off."
@@ -119,7 +156,7 @@ export default function ChatUI() {
               style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: "10px 12px", borderRadius: "10px", border: `1px solid ${BORDER}`, fontSize: "0.85rem", fontFamily: "inherit", outline: "none", color: "#111111" }}
             />
             {reportStatus === "error" && (
-              <p style={{ color: "#b91c1c", fontSize: "0.78rem", margin: "8px 0 0" }}>Couldn't send the report. Please try again.</p>
+              <p role="alert" style={{ color: "#b91c1c", fontSize: "0.78rem", margin: "8px 0 0" }}>Couldn't send the report. Please try again.</p>
             )}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "12px" }}>
               <button onClick={() => setReportOpen(false)}
@@ -223,7 +260,7 @@ export default function ChatUI() {
 
   /* ── LANDING ── */
   if (!hasMessages) return (
-    <div className="app-viewport landing-viewport" style={{ backgroundColor: "#f6f6f7", fontFamily: "system-ui, sans-serif" }}>
+    <main className="app-viewport landing-viewport" style={{ backgroundColor: "#f6f6f7", fontFamily: "system-ui, sans-serif" }}>
     {/* Inner wrapper: centers on tall screens, stacks naturally on short/mobile ones */}
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100%", padding: "2rem 1rem", boxSizing: "border-box", width: "100%" }}>
 
@@ -243,17 +280,19 @@ export default function ChatUI() {
             ref={inputRef}
             value={input}
             onChange={e => setInput(e.target.value)}
+            aria-label="Ask EIRA a question about TAMU ECE"
             placeholder="Ask me anything about TAMU ECE…"
             style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: "#111111", fontSize: "0.95rem" }}
           />
-          <button type="submit" disabled={!input.trim()} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "34px", height: "34px", borderRadius: "9px", backgroundColor: input.trim() ? MAROON : "#e5e7eb", border: "none", cursor: input.trim() ? "pointer" : "default", flexShrink: 0, transition: "background 0.2s" }}>
+          <button type="submit" aria-label="Send question" disabled={!input.trim()} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "34px", height: "34px", borderRadius: "9px", backgroundColor: input.trim() ? MAROON : "#e5e7eb", border: "none", cursor: input.trim() ? "pointer" : "default", flexShrink: 0, transition: "background 0.2s" }}>
             <Send size={14} color="white" />
           </button>
         </div>
+        <Disclaimer />
       </form>
 
       {/* Example question cards */}
-      <p style={{ fontSize: "0.72rem", color: "#9ca3af", margin: "1.75rem 0 0.75rem", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 500 }}>
+      <p style={{ fontSize: "0.72rem", color: "#4b5563", margin: "1.75rem 0 0.75rem", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 500 }}>
         Try asking
       </p>
       <div className="example-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px", width: "100%", maxWidth: "720px" }}>
@@ -276,11 +315,11 @@ export default function ChatUI() {
             }}
           >
             {/* Icon badge */}
-            <span style={{ fontSize: "18px", width: "36px", height: "36px", borderRadius: "10px", backgroundColor: card.iconBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <span aria-hidden="true" style={{ fontSize: "18px", width: "36px", height: "36px", borderRadius: "10px", backgroundColor: card.iconBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
               {card.icon}
             </span>
             {/* Category label */}
-            <span style={{ fontSize: "0.68rem", color: "#9ca3af", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", lineHeight: 1 }}>
+            <span style={{ fontSize: "0.68rem", color: "#4b5563", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", lineHeight: 1 }}>
               {card.category}
             </span>
             {/* Question text */}
@@ -312,12 +351,12 @@ export default function ChatUI() {
       `}</style>
     </div>{/* end inner centering wrapper */}
     {reportModal}
-    </div>
+    </main>
   );
 
   /* ── CHAT ── */
   return (
-    <div className="app-viewport" style={{ display: "flex", flexDirection: "column", backgroundColor: BG, fontFamily: "system-ui, sans-serif" }}>
+    <main className="app-viewport" style={{ display: "flex", flexDirection: "column", backgroundColor: BG, fontFamily: "system-ui, sans-serif" }}>
 
       {/* Header */}
       <div className="chat-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 24px", borderBottom: `1px solid ${BORDER}`, flexShrink: 0 }}>
@@ -325,6 +364,7 @@ export default function ChatUI() {
           <button
             onClick={() => setMessages([])}
             title="Back to home"
+            aria-label="Back to home"
             style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "32px", height: "32px", borderRadius: "8px", backgroundColor: "transparent", border: `1px solid ${BORDER}`, cursor: "pointer", color: "#6b7280", flexShrink: 0, transition: "background 0.15s" }}
             onMouseEnter={e => (e.currentTarget.style.backgroundColor = "#f3f4f6")}
             onMouseLeave={e => (e.currentTarget.style.backgroundColor = "transparent")}
@@ -338,7 +378,7 @@ export default function ChatUI() {
       </div>
 
       {/* Messages */}
-      <div className="chat-scroll" style={{ flex: 1, overflowY: "auto", padding: "24px 16px" }}>
+      <div className="chat-scroll" role="log" aria-label="Conversation" aria-live="off" tabIndex={0} style={{ flex: 1, overflowY: "auto", padding: "24px 16px" }}>
         <div style={{ maxWidth: "720px", margin: "0 auto", display: "flex", flexDirection: "column", gap: "20px" }}>
           {messages.map((msg, i) => (
             <div key={i} style={{ display: "flex", gap: "12px", justifyContent: msg.role === "user" ? "flex-end" : "flex-start" }}>
@@ -351,14 +391,14 @@ export default function ChatUI() {
                 <div style={{ padding: "12px 16px", borderRadius: msg.role === "user" ? "18px 18px 4px 18px" : "4px 18px 18px 18px", backgroundColor: msg.role === "user" ? MAROON : CARD, border: msg.role === "assistant" ? `1px solid ${BORDER}` : "none", color: msg.role === "user" ? "white" : "#111111", fontSize: "0.875rem", lineHeight: 1.6 }}>
                   {msg.loading ? (
                     <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#6b7280" }}>
-                      <RefreshCw size={13} style={{ animation: "spin 1s linear infinite" }} />
+                      <RefreshCw size={13} aria-hidden="true" style={{ animation: "spin 1s linear infinite" }} />
                       <span>EIRA is looking that up…</span>
                     </div>
                   ) : msg.role === "user" ? (
                     msg.content
                   ) : (
                     <div className="markdown-body">
-                      <ReactMarkdown>{msg.content.replace(/\\n/g, "\n")}</ReactMarkdown>
+                      <ReactMarkdown components={{ a: ({ href, children }) => <SafeLink href={href}>{children}</SafeLink> }}>{msg.content.replace(/\\n/g, "\n")}</ReactMarkdown>
                     </div>
                   )}
                 </div>
@@ -385,7 +425,7 @@ export default function ChatUI() {
                       return (
                         <a key={si} href={s.url} target="_blank" rel="noopener noreferrer"
                           style={{ display: "flex", alignItems: "flex-start", gap: "8px", padding: "8px 12px", borderRadius: "8px", backgroundColor: CARD, border: `1px solid ${BORDER}`, color: "#6b7280", fontSize: "0.75rem", textDecoration: "none" }}>
-                          <ExternalLink size={11} style={{ marginTop: "2px", flexShrink: 0 }} />
+                          <ExternalLink size={11} aria-hidden="true" style={{ marginTop: "2px", flexShrink: 0 }} />
                           <div>
                             <span style={{ color: "#111111", fontWeight: 500 }}>{s.title}</span>
                             <span style={{ marginLeft: "8px", padding: "1px 6px", borderRadius: "4px", fontSize: "0.65rem", backgroundColor: col.bg, color: col.color }}>{s.section}</span>
@@ -398,7 +438,7 @@ export default function ChatUI() {
               </div>
               {msg.role === "user" && (
                 <div className="msg-avatar" style={{ width: "30px", height: "30px", borderRadius: "50%", backgroundColor: BORDER, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: "4px" }}>
-                  <User size={14} color="#9ca3af" />
+                  <User size={14} color="#6b7280" aria-hidden="true" />
                 </div>
               )}
             </div>
@@ -415,24 +455,27 @@ export default function ChatUI() {
               ref={inputRef}
               value={input}
               onChange={e => setInput(e.target.value)}
+              aria-label="Ask EIRA a question"
               placeholder="Ask anything"
               style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: "#111111", fontSize: "0.9rem" }}
             />
             {streaming ? (
-              <button type="button" onClick={stopStreaming} title="Stop generating"
+              <button type="button" onClick={stopStreaming} title="Stop generating" aria-label="Stop generating"
                 style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "34px", height: "34px", borderRadius: "50%", backgroundColor: MAROON, border: "none", cursor: "pointer", flexShrink: 0, transition: "background 0.2s" }}>
                 <Square size={12} color="white" fill="white" />
               </button>
             ) : (
-              <button type="submit" disabled={!input.trim()}
+              <button type="submit" aria-label="Send question" disabled={!input.trim()}
                 style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "34px", height: "34px", borderRadius: "50%", backgroundColor: input.trim() ? MAROON : "#2a2a2a", border: "none", cursor: input.trim() ? "pointer" : "default", flexShrink: 0, transition: "background 0.2s" }}>
                 <Send size={14} color="white" />
               </button>
             )}
           </div>
+          <Disclaimer />
         </form>
       </div>
 
+      {liveRegion}
       {reportModal}
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
@@ -449,6 +492,6 @@ export default function ChatUI() {
           .default-questions-grid { grid-template-columns: 1fr !important; }
         }
       `}</style>
-    </div>
+    </main>
   );
 }

@@ -25,9 +25,9 @@ export function FeedbackButtons({
         aria-label="Good answer"
         aria-pressed={feedback === "up"}
         disabled={feedback === "up"}
-        style={{ background: "none", border: "none", cursor: feedback === "up" ? "default" : "pointer", color: feedback === "up" ? "#15803d" : "#9ca3af", padding: "2px" }}
+        style={{ background: "none", border: "none", cursor: feedback === "up" ? "default" : "pointer", color: feedback === "up" ? "#15803d" : "#6b7280", padding: "2px" }}
       >
-        <ThumbsUp size={14} />
+        <ThumbsUp size={14} aria-hidden="true" />
       </button>
       <button
         onClick={() => onRate("down")}
@@ -35,11 +35,11 @@ export function FeedbackButtons({
         aria-label="Bad answer"
         aria-pressed={feedback === "down"}
         disabled={feedback === "down"}
-        style={{ background: "none", border: "none", cursor: feedback === "down" ? "default" : "pointer", color: feedback === "down" ? "#b91c1c" : "#9ca3af", padding: "2px" }}
+        style={{ background: "none", border: "none", cursor: feedback === "down" ? "default" : "pointer", color: feedback === "down" ? "#b91c1c" : "#6b7280", padding: "2px" }}
       >
-        <ThumbsDown size={14} />
+        <ThumbsDown size={14} aria-hidden="true" />
       </button>
-      {feedback && <span style={{ fontSize: "0.7rem", color: "#9ca3af" }}>Thanks for the feedback!</span>}
+      {feedback && <span role="status" style={{ fontSize: "0.7rem", color: "#4b5563" }}>Thanks for the feedback!</span>}
     </div>
   );
 }

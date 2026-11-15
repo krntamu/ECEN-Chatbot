@@ -5,6 +5,7 @@
  */
 
 import { NextRequest } from "next/server";
+import { clientIpFromXff } from "../../../lib/clientIp";
 
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8000";
 
@@ -78,7 +79,7 @@ async function fetchBackendWithRetry(body: unknown, clientIp: string): Promise<R
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  const clientIp = clientIpFromXff(req.headers.get("x-forwarded-for"));
 
   let upstream: Response;
   try {
