@@ -378,8 +378,13 @@ retries) — flip to 1 in `cloudbuild.yaml` to keep one instance warm (~$40/mo).
 # logs / audit trail (one AUDIT line per question: hashed IP, intent, sources)
 gcloud run services logs read ecen-chatbot --region us-central1 --limit 50
 
-# usage counters since instance start
-curl https://<service-url>/admin/stats
+# is the live site answering? (health + two real questions through the public URL)
+./scripts/smoke.sh
+
+# usage counters since instance start, plus a `durable` section read from the
+# chat_log / chat_feedback tables (all instances, last N days). /admin/* is
+# only reachable on the backend port, so this is for local runs.
+curl -H "X-Admin-Token: $ADMIN_TOKEN" "http://localhost:8000/admin/stats?days=7"
 
 # manual full re-index (nightly job does --diff automatically at 2AM Central)
 gcloud run jobs execute ecen-reindex --region us-central1 --wait
@@ -392,6 +397,68 @@ In-app bug reports (chat UI → "report a problem") file GitHub issues labeled
 `user-report`; the Actions workflows in `.github/workflows/` triage them and
 open fix PRs on `claude/fix-issue-<n>` / codex branches. **Agents never push
 to `main`** — humans review and merge.
+
+### 7.1 Weekly review (the feedback loop)
+
+Every question and every thumbs up/down is stored in Postgres
+(`backend/analytics.py`; tables `chat_log`, `chat_feedback`; rows older than
+`ANALYTICS_RETENTION_DAYS`, default 180, are deleted; `ANALYTICS_DB=0` turns it
+off). IPs are stored hashed. Once a week, run these against the database:
+
+```sql
+-- questions EIRA could not answer: content gaps, or retrieval misses
+SELECT ts::date, question FROM chat_log
+WHERE flagged = 'no_reliable_context' AND ts > now() - interval '7 days'
+ORDER BY ts DESC;
+
+-- answers users marked as bad
+SELECT ts::date, question, answer_preview FROM chat_feedback
+WHERE rating = 'down' AND ts > now() - interval '7 days' ORDER BY ts DESC;
+
+-- volume, latency and failure mix
+SELECT count(*) AS questions,
+       percentile_cont(0.5)  WITHIN GROUP (ORDER BY latency_ms) AS p50_ms,
+       percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_ms
+FROM chat_log WHERE ts > now() - interval '7 days';
+SELECT coalesce(flagged, 'answered') AS outcome, count(*) FROM chat_log
+WHERE ts > now() - interval '7 days' GROUP BY 1 ORDER BY 2 DESC;
+```
+
+Each real failure becomes a case in `scripts/eval.py` before it is fixed, so it
+can't come back unnoticed.
+
+### 7.2 Logs and request IDs
+
+On Cloud Run every log line is JSON with a `severity` and a `request_id`
+(`backend/obs.py`). The same ID is returned to the browser as `X-Request-ID`.
+
+```bash
+# everything one request did
+gcloud logging read 'resource.labels.service_name="ecen-chatbot" AND jsonPayload.request_id="<id>"' --limit 100
+# errors only
+gcloud logging read 'resource.labels.service_name="ecen-chatbot" AND severity>=ERROR' --freshness 1d
+# slow answers
+gcloud logging read 'resource.labels.service_name="ecen-chatbot" AND jsonPayload.event="audit" AND jsonPayload.data.latency_ms>15000' --freshness 7d
+```
+
+Set `LOG_FORMAT=text` to force the readable format, `LOG_FORMAT=json` to force
+JSON locally.
+
+### 7.3 Alerts to have (one-time setup in the Cloud console)
+
+| Alert | How |
+|---|---|
+| Site can't answer questions | Monitoring > Uptime checks > HTTPS GET `/api/health` on the service URL, every 5 min, alert after 2 failures. `/api/health` returns 503 when the database, index or embedder is unusable. |
+| Nightly re-index failed | Monitoring > Alerting > log-based alert on `resource.type="cloud_run_job" AND resource.labels.job_name="ecen-reindex" AND severity>=ERROR`. This job failed silently for 36 nights once. |
+| Error spike | Log-based alert on `resource.labels.service_name="ecen-chatbot" AND severity>=ERROR`, more than 10 in 10 min. Works now that logs carry severity. |
+| LLM spend | A hard monthly limit on the OpenAI project, plus a GCP billing budget alert. |
+
+### 7.4 Dependencies
+
+`constraints.txt` pins every Python package in the image. Refresh it from a
+build you trust with `./scripts/lock_deps.sh`, commit, and let Dependabot
+propose updates. Run the eval suite on Dependabot PRs that touch `torch`,
+`transformers`, `sentence-transformers` or `openai` before merging.
 
 ## 8. Gotchas / troubleshooting (each of these cost real time)
 
