@@ -38,9 +38,11 @@ from graph_retriever import (
 from scheduler import create_scheduler, run_reindex
 import scheduler as _scheduler
 
-logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(message)s")
+import analytics
+import obs
+
+# JSON lines with severity + request ID on Cloud Run, readable text locally.
+obs.setup_logging()
 log = logging.getLogger(__name__)
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────
@@ -142,6 +144,10 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
 
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
 ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
+# Tags every request (and every log line it produces) with an ID, returned to
+# the caller as X-Request-ID.
+app.add_middleware(obs.RequestIdMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -323,25 +329,38 @@ async def feedback(request: Request, req: FeedbackRequest):
     else:
         _STATS["feedback_down"] += 1
     ip = _client_ip(request)
+    ip_hash = hashlib.sha256(ip.encode()).hexdigest()[:12]
     log.info("FEEDBACK %s", _j.dumps({
         "rating": req.rating,
-        "ip_hash": hashlib.sha256(ip.encode()).hexdigest()[:12],
+        "ip_hash": ip_hash,
         "question": req.question[:300],
         "answer_preview": req.answer[:300],
     }))
+    analytics.record_feedback(
+        request_id=obs.current_request_id(), ip_hash=ip_hash, rating=req.rating,
+        question=req.question[:1000], answer_preview=req.answer[:2000])
     return {"ok": True}
 
 
 @app.get("/admin/stats", dependencies=[Depends(require_admin)])
-async def stats():
-    """Lightweight usage counters since this instance started."""
-    return {
+async def stats(days: int = 7):
+    """Usage numbers. The top-level counters are in-memory since this instance
+    started (unchanged shape). `durable` comes from the chat_log /
+    chat_feedback tables and covers every instance over the last `days` days,
+    including the unanswered questions and thumbs-down answers worth reviewing."""
+    import asyncio
+    body = {
         "questions": _STATS["questions"],
         "intents": dict(_STATS["intents"]),
         "flags": dict(_STATS["flags"]),
         "feedback": {"up": _STATS["feedback_up"], "down": _STATS["feedback_down"]},
         "cache_hits": _STATS["cache_hits"],
     }
+    try:
+        body["durable"] = await asyncio.to_thread(analytics.summary, days)
+    except Exception as e:  # noqa: BLE001
+        body["durable"] = {"error": f"unavailable ({type(e).__name__})"}
+    return body
 
 
 @app.post("/report-issue")
@@ -601,9 +620,11 @@ def _cache_put(key: str, answer: str, sources: list) -> None:
 
 
 def _audit(request: Request, question: str, resolved: str, route: Optional[dict],
-           sources: list[dict], answer: str, flagged: str = "") -> None:
-    """Structured audit record → Cloud Logging. IP is hashed (privacy), answer
-    truncated. One line per request, greppable via 'AUDIT'."""
+           sources: list[dict], answer: str, flagged: str = "",
+           started: Optional[float] = None) -> None:
+    """Structured audit record → Cloud Logging + the chat_log table. IP is
+    hashed (privacy), answer truncated. One line per request, greppable via
+    'AUDIT'. `started` is the perf_counter() at request start, for latency."""
     import hashlib
     import json as _j
     _STATS["questions"] += 1
@@ -611,16 +632,28 @@ def _audit(request: Request, question: str, resolved: str, route: Optional[dict]
     if flagged:
         _STATS["flags"][flagged] += 1
     ip = _client_ip(request)
+    ip_hash = hashlib.sha256(ip.encode()).hexdigest()[:12]
+    latency_ms = (int((_time.perf_counter() - started) * 1000)
+                  if started is not None else None)
+    intent = (route or {}).get("intent")
+    source_urls = [s.get("url", "") for s in sources][:10]
+    resolved_or_none = resolved if resolved != question else None
     log.info("AUDIT %s", _j.dumps({
-        "ip_hash": hashlib.sha256(ip.encode()).hexdigest()[:12],
+        "ip_hash": ip_hash,
         "question": question[:300],
-        "resolved": resolved[:300] if resolved != question else None,
-        "intent": (route or {}).get("intent"),
+        "resolved": resolved_or_none[:300] if resolved_or_none else None,
+        "intent": intent,
         "flagged": flagged or None,
-        "sources": [s.get("url", "") for s in sources][:10],
+        "sources": source_urls,
         "answer_chars": len(answer),
         "answer_preview": answer[:300],
+        "latency_ms": latency_ms,
     }))
+    analytics.record_chat(
+        request_id=obs.current_request_id(), ip_hash=ip_hash,
+        question=question[:1000], resolved=resolved_or_none, intent=intent,
+        flagged=flagged or None, sources=source_urls, answer_chars=len(answer),
+        answer_preview=answer[:2000], latency_ms=latency_ms)
 
 
 # Context for small talk ("who are you", "hi", "what can you do") — answered
@@ -1024,7 +1057,8 @@ async def chat_stream(request: Request, req: ChatRequest):
                  _t.perf_counter() - _llm_t0, _t.perf_counter() - _t_req, len(answer_acc))
         if ckey and emitted > 0 and answer_acc:
             _cache_put(ckey, answer_acc, sources)
-        _audit(request, req.question, search_req.question, route, sources, answer_acc)
+        _audit(request, req.question, search_req.question, route, sources,
+               answer_acc, started=_t_req)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

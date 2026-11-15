@@ -63,3 +63,6 @@ Thumbs.db
 
 # ───────────── Eval reports (generated) ─────────────
 eval_reports/
+
+# Schema migrations ARE source — only data dumps are ignored.
+!scripts/migrations/*.sql
