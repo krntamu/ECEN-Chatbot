@@ -29,7 +29,11 @@ WORKDIR /app
 # Python deps (backend + crawler, so this image can also run the re-index job)
 COPY backend/requirements.txt ./requirements-backend.txt
 COPY crawler/requirements.txt ./requirements-crawler.txt
-RUN pip install --no-cache-dir -r requirements-backend.txt -r requirements-crawler.txt
+# constraints.txt pins exact versions so builds are reproducible (see the file
+# header; fill it with scripts/lock_deps.sh). Empty constraints = no pins.
+COPY constraints.txt ./constraints.txt
+RUN pip install --no-cache-dir -c constraints.txt \
+        -r requirements-backend.txt -r requirements-crawler.txt
 
 # Pre-bake ML models into the image so cold starts don't pay the download cost
 RUN python -c "\

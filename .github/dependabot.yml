@@ -1,0 +1,28 @@
+# Weekly dependency update PRs. Grouped so a week's updates arrive as one PR
+# per ecosystem instead of twenty. Security updates are opened immediately
+# regardless of this schedule (enable "Dependabot security updates" in the
+# repo's Settings > Code security).
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"            # constraints.txt
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    groups:
+      python:
+        patterns: ["*"]
+        update-types: [minor, patch]
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    groups:
+      frontend:
+        patterns: ["*"]
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: monthly }
+  - package-ecosystem: docker
+    directory: "/"
+    schedule: { interval: monthly }
