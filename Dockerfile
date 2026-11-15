@@ -11,7 +11,7 @@ COPY frontend/ .
 RUN npm run build
 
 # ── Stage 2: Combined runtime ────────────────────────────────────────────────
-FROM python:3.11-slim
+FROM python:3.15-slim
 
 ENV HF_HOME=/app/.hf_cache \
     PYTHONUNBUFFERED=1 \
