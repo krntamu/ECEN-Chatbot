@@ -47,6 +47,14 @@ from sentence_transformers import SentenceTransformer, CrossEncoder; \
 SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2'); \
 CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
 
+# Also bake the int8 ONNX build of the reranker (23 MB), used when
+# RERANK_BACKEND=onnx. Must be downloaded here: the runtime is offline.
+RUN python -c "\
+from huggingface_hub import hf_hub_download; \
+[hf_hub_download('cross-encoder/ms-marco-MiniLM-L6-v2', f) for f in \
+ ('onnx/model_quint8_avx2.onnx', 'config.json', 'tokenizer.json', \
+  'tokenizer_config.json', 'special_tokens_map.json', 'vocab.txt')]"
+
 # Models are baked into the image cache above. Force offline mode at RUNTIME so
 # startup uses the local cache instead of HEAD-checking HuggingFace for updates.
 # Those checks were returning HTTP 429 (rate-limited) and adding ~2.5 minutes to

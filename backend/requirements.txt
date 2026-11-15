@@ -3,7 +3,9 @@ uvicorn[standard]
 openai>=1.50.0
 psycopg2-binary
 pgvector
-sentence-transformers
+# [onnx] adds optimum + onnxruntime for the optional ONNX reranker
+# (RERANK_BACKEND=onnx). PyTorch stays the default backend.
+sentence-transformers[onnx]
 rank-bm25
 apscheduler
 python-dotenv
