@@ -69,7 +69,7 @@ jobs:
     permissions:
       issues: write
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v9
         env:
           PLAN: ${{ needs.triage.outputs.final_message }}
           ISSUE_NUMBER: ${{ needs.triage.outputs.issue_number }}
