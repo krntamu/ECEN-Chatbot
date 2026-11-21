@@ -127,7 +127,7 @@ jobs:
           steps.npmtest.outputs.ok == 'true' &&
           steps.build.outputs.ok == 'true' &&
           steps.diff.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: codex/fix-issue-${{ github.event.issue.number }}
